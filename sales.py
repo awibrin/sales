@@ -32,6 +32,15 @@ st.markdown("""
     div[data-testid="stMetricValue"] {
         font-size: 24px;
     }
+    .group-header {
+        background-color: #0066cc;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        font-weight: bold;
+        text-align: center;
+        margin: 10px 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -39,7 +48,6 @@ st.markdown("""
 
 def get_public_holidays(year):
     """Retourne les jours fériés belges/français/espagnols pour une année"""
-    # Jours fériés fixes communs
     holidays = [
         datetime(year, 1, 1),   # Nouvel An
         datetime(year, 5, 1),   # Fête du Travail
@@ -52,9 +60,6 @@ def get_public_holidays(year):
         datetime(year, 8, 15),  # Assomption
     ]
     
-    # Pâques et jours mobiles (calcul approximatif - à affiner si besoin)
-    # Pour 2025: Pâques = 20 avril
-    # Pour 2026: Pâques = 5 avril
     easter_dates = {
         2024: datetime(2024, 3, 31),
         2025: datetime(2025, 4, 20),
@@ -77,11 +82,9 @@ def is_working_day(date, holidays=None):
     if holidays is None:
         holidays = get_public_holidays(date.year)
     
-    # Weekend (samedi=5, dimanche=6)
     if date.weekday() >= 5:
         return False
     
-    # Jour férié
     if date in holidays:
         return False
     
@@ -123,7 +126,6 @@ def init_database():
     conn = sqlite3.connect('commercial_tracking.db')
     cursor = conn.cursor()
     
-    # Table des ventes quotidiennes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,7 +137,6 @@ def init_database():
         )
     ''')
     
-    # Table des objectifs mensuels
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS monthly_targets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,7 +148,6 @@ def init_database():
         )
     ''')
     
-    # Table du YTD initial (Janvier manuel)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ytd_init (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,7 +158,6 @@ def init_database():
         )
     ''')
     
-    # Table des jours fériés personnalisés (optionnel)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS custom_holidays (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +206,14 @@ def get_zones():
     filiales = ["BEFR", "BENL", "France", "Espagne"]
     concessions = ["Sud-Rhône", "Hauts-de-France", "Luxembourg"]
     return filiales + concessions
+
+def get_filiales():
+    """Retourne uniquement les filiales"""
+    return ["BEFR", "BENL", "France", "Espagne"]
+
+def get_concessions():
+    """Retourne uniquement les concessions"""
+    return ["Sud-Rhône", "Hauts-de-France", "Luxembourg"]
 
 def save_sale(zone, date, volume):
     """Enregistre ou met à jour une vente quotidienne"""
@@ -279,6 +286,21 @@ def get_sales_data(zone, year, month):
         df['date'] = pd.to_datetime(df['date'])
     return df
 
+def get_all_sales_ytd(zone, year, end_date):
+    """Récupère TOUTES les ventes YTD (janvier à date actuelle)"""
+    conn = get_db_connection()
+    query = '''
+        SELECT COALESCE(SUM(volume), 0) as total
+        FROM sales
+        WHERE zone = ? 
+        AND strftime('%Y', date) = ?
+        AND date <= ?
+    '''
+    df = pd.read_sql_query(query, conn, params=(zone, str(year), end_date.strftime('%Y-%m-%d')))
+    conn.close()
+    
+    return df['total'].iloc[0] if not df.empty else 0
+
 def get_monthly_target(zone, year, month):
     """Récupère l'objectif mensuel"""
     conn = get_db_connection()
@@ -292,7 +314,7 @@ def get_monthly_target(zone, year, month):
     return result[0] if result else 0
 
 def get_ytd_init(zone, year):
-    """Récupère le volume de janvier initial"""
+    """Récupère le volume de janvier initial (manuel)"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -304,11 +326,13 @@ def get_ytd_init(zone, year):
     return result[0] if result else 0
 
 def calculate_ytd(zone, current_date):
-    """Calcule le YTD : Janvier manuel + cumul depuis février"""
+    """Calcule le YTD CORRECT : Janvier manuel + toutes les ventes depuis février"""
     year = current_date.year
-    january_init = get_ytd_init(zone, year)
     
-    # Cumul depuis février
+    # Récupérer le janvier manuel
+    january_manual = get_ytd_init(zone, year)
+    
+    # Récupérer TOUTES les ventes saisies depuis février jusqu'à aujourd'hui
     conn = get_db_connection()
     query = '''
         SELECT COALESCE(SUM(volume), 0) as total
@@ -322,7 +346,11 @@ def calculate_ytd(zone, current_date):
     conn.close()
     
     cumul_from_feb = df['total'].iloc[0] if not df.empty else 0
-    return january_init + cumul_from_feb
+    
+    # YTD = Janvier manuel + Cumul depuis février
+    total_ytd = january_manual + cumul_from_feb
+    
+    return total_ytd
 
 def get_week_number(date):
     """Retourne le numéro de semaine dans le mois (W-1, W-2, etc.)"""
@@ -341,7 +369,6 @@ def calculate_weekly_data(zone, year, month):
     weekly = sales_df.groupby('week')['volume'].sum().reset_index()
     weekly.columns = ['Semaine', 'Réalisé']
     
-    # Calculer l'objectif hebdomadaire basé sur jours ouvrables
     monthly_target = get_monthly_target(zone, year, month)
     working_days_month = get_working_days_in_month(year, month)
     total_working_days = len(working_days_month)
@@ -355,7 +382,6 @@ def calculate_weekly_data(zone, year, month):
         all_holidays = holidays.union(custom_holidays)
         
         for week_num in weekly['Semaine']:
-            # Compter les jours ouvrables dans cette semaine
             week_dates = sales_df[sales_df['week'] == week_num]['date'].unique()
             week_working_days = sum(1 for d in week_dates if is_working_day(pd.Timestamp(d).to_pydatetime(), all_holidays))
             week_target = (monthly_target / total_working_days) * week_working_days
@@ -374,11 +400,9 @@ def calculate_run_rate(zone, year, month, current_date):
     if monthly_target == 0:
         return 0
     
-    # Ventes réalisées jusqu'à aujourd'hui
     sales_df = get_sales_data(zone, year, month)
     realized = sales_df['volume'].sum() if not sales_df.empty else 0
     
-    # Jours ouvrables restants (incluant aujourd'hui s'il est ouvrable)
     last_day_num = calendar.monthrange(year, month)[1]
     last_date = datetime(year, month, last_day_num)
     
@@ -391,11 +415,35 @@ def calculate_run_rate(zone, year, month, current_date):
     if working_days_remaining <= 0:
         return 0
     
-    # Calcul du run-rate nécessaire
     remaining_volume = monthly_target - realized
     run_rate = remaining_volume / working_days_remaining
     
-    return max(0, run_rate)  # Ne peut pas être négatif
+    return max(0, run_rate)
+
+def get_group_consolidation(year, month, current_date):
+    """Calcule la consolidation groupe (toutes filiales SAUF Espagne)"""
+    filiales = ["BEFR", "BENL", "France"]  # Espagne exclue
+    
+    total_target = 0
+    total_realized = 0
+    total_ytd = 0
+    
+    for filiale in filiales:
+        target = get_monthly_target(filiale, year, month)
+        sales_df = get_sales_data(filiale, year, month)
+        realized = sales_df['volume'].sum() if not sales_df.empty else 0
+        ytd = calculate_ytd(filiale, current_date)
+        
+        total_target += target
+        total_realized += realized
+        total_ytd += ytd
+    
+    return {
+        'target': total_target,
+        'realized': total_realized,
+        'ytd': total_ytd,
+        'delta': total_realized - total_target
+    }
 
 # ==================== INTERFACE STREAMLIT ====================
 
@@ -405,22 +453,43 @@ def main():
     st.title("📊 Pilotage Commercial Intransigeant")
     st.caption("🔵 Calculs basés sur jours ouvrables (hors weekends et jours fériés)")
     
-    # Date du jour
     today = datetime.now()
     current_year = today.year
     current_month = today.month
     
-    # Onglets principaux
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Dashboard", "✍️ Saisie Ventes", "⚙️ Configuration", "📅 Jours Fériés"])
     
     # ==================== DASHBOARD ====================
     with tab1:
         st.subheader("Tableau de Bord")
         
-        # Sélection de zone
+        # CONSOLIDATION GROUPE EN HAUT
+        st.markdown('<div class="group-header">🌍 CONSOLIDATION GROUPE (BEFR + BENL + France)</div>', unsafe_allow_html=True)
+        
+        group_data = get_group_consolidation(current_year, current_month, today)
+        
+        col_g1, col_g2, col_g3, col_g4 = st.columns(4)
+        with col_g1:
+            st.metric("🎯 Target Groupe", f"{group_data['target']:,}")
+        with col_g2:
+            delta_color = "normal" if group_data['delta'] >= 0 else "inverse"
+            st.metric("✅ Réalisé Groupe", f"{group_data['realized']:,}", 
+                     delta=f"{group_data['delta']:+,}", delta_color=delta_color)
+        with col_g3:
+            st.metric("📅 YTD Groupe", f"{group_data['ytd']:,}")
+        with col_g4:
+            if group_data['target'] > 0:
+                completion = (group_data['realized'] / group_data['target']) * 100
+                st.metric("📊 Taux Réalisation", f"{completion:.1f}%")
+            else:
+                st.metric("📊 Taux Réalisation", "N/A")
+        
+        st.markdown("---")
+        
+        # DÉTAIL PAR ZONE
+        st.subheader("📋 Détail par Zone")
         selected_zone = st.selectbox("Sélectionner une zone", get_zones(), key="dashboard_zone")
         
-        # Indicateur jour ouvrable
         holidays = get_public_holidays(current_year)
         custom_holidays = get_custom_holidays()
         all_holidays = holidays.union(custom_holidays)
@@ -430,7 +499,6 @@ def main():
         else:
             st.warning("⚠️ Aujourd'hui est un weekend ou jour férié")
         
-        # Métriques clés
         col1, col2, col3 = st.columns(3)
         
         monthly_target = get_monthly_target(selected_zone, current_year, current_month)
@@ -447,11 +515,14 @@ def main():
             ytd = calculate_ytd(selected_zone, today)
             st.metric("📅 YTD", f"{ytd:,}")
         
-        # Run-Rate Dynamique
+        # Afficher le détail du calcul YTD
+        january_manual = get_ytd_init(selected_zone, current_year)
+        feb_onwards = ytd - january_manual
+        st.caption(f"ℹ️ YTD = Janvier manuel ({january_manual:,}) + Février à aujourd'hui ({feb_onwards:,})")
+        
         st.markdown("---")
         run_rate = calculate_run_rate(selected_zone, current_year, current_month, today)
         
-        # Calcul des jours ouvrables
         working_days_total = len(get_working_days_in_month(current_year, current_month))
         last_day_num = calendar.monthrange(current_year, current_month)[1]
         last_date = datetime(current_year, current_month, last_day_num)
@@ -466,7 +537,6 @@ def main():
         with col_rr3:
             st.metric("📆 Jours Ouvrables Total", f"{working_days_passed}/{working_days_total}")
         
-        # Alerte run-rate
         if run_rate > 0 and working_days_passed > 0:
             avg_daily = monthly_realized / working_days_passed
             if run_rate > avg_daily * 1.2:
@@ -476,14 +546,12 @@ def main():
             else:
                 st.success(f"✅ Objectif atteignable : continuez au rythme actuel de {avg_daily:.1f} ventes/jour")
         
-        # Données hebdomadaires
         st.markdown("---")
         st.subheader("📊 Performance Hebdomadaire")
         
         weekly_df = calculate_weekly_data(selected_zone, current_year, current_month)
         
         if not weekly_df.empty:
-            # Affichage avec couleurs
             def color_delta(val):
                 color = '#28a745' if val >= 0 else '#dc3545'
                 return f'color: {color}; font-weight: bold'
@@ -493,7 +561,6 @@ def main():
         else:
             st.info("Aucune donnée hebdomadaire disponible")
         
-        # Résumé mensuel
         st.markdown("---")
         st.subheader("📅 Résumé Mensuel")
         
@@ -509,6 +576,39 @@ def main():
         })
         
         st.dataframe(monthly_summary, use_container_width=True, hide_index=True)
+        
+        # TABLE RÉCAPITULATIVE TOUTES ZONES
+        st.markdown("---")
+        st.subheader("📊 Vue d'Ensemble - Toutes les Zones")
+        
+        all_zones_data = []
+        for zone in get_zones():
+            target = get_monthly_target(zone, current_year, current_month)
+            sales = get_sales_data(zone, current_year, current_month)
+            realized = sales['volume'].sum() if not sales.empty else 0
+            delta = realized - target
+            ytd_zone = calculate_ytd(zone, today)
+            completion = (realized / target * 100) if target > 0 else 0
+            
+            all_zones_data.append({
+                'Zone': zone,
+                'Target': target,
+                'Réalisé': realized,
+                'Delta': delta,
+                'YTD': ytd_zone,
+                'Taux %': f"{completion:.1f}%"
+            })
+        
+        zones_df = pd.DataFrame(all_zones_data)
+        
+        def color_row(row):
+            if row['Delta'] >= 0:
+                return ['background-color: #d4edda'] * len(row)
+            else:
+                return ['background-color: #f8d7da'] * len(row)
+        
+        styled_zones = zones_df.style.apply(color_row, axis=1)
+        st.dataframe(styled_zones, use_container_width=True, hide_index=True)
     
     # ==================== SAISIE VENTES ====================
     with tab2:
@@ -523,8 +623,11 @@ def main():
         with col2:
             sale_volume = st.number_input("Volume de ventes", min_value=0, step=1)
             
-            # Vérifier si c'est un jour ouvrable
             sale_datetime = datetime.combine(sale_date, datetime.min.time())
+            holidays = get_public_holidays(current_year)
+            custom_holidays = get_custom_holidays()
+            all_holidays = holidays.union(custom_holidays)
+            
             if not is_working_day(sale_datetime, all_holidays):
                 st.warning("⚠️ Ce jour est un weekend ou un jour férié")
         
@@ -537,7 +640,6 @@ def main():
             else:
                 st.error("Le volume doit être positif")
         
-        # Historique des saisies récentes
         st.markdown("---")
         st.subheader("📜 Historique Récent")
         
@@ -560,7 +662,6 @@ def main():
     with tab3:
         st.subheader("⚙️ Configuration des Objectifs")
         
-        # Targets mensuels
         st.markdown("### 🎯 Objectifs Mensuels")
         
         config_zone = st.selectbox("Zone", get_zones(), key="config_zone")
@@ -573,7 +674,6 @@ def main():
         with col3:
             target_value = st.number_input("Objectif", min_value=0, step=10)
         
-        # Afficher le nombre de jours ouvrables du mois sélectionné
         selected_working_days = len(get_working_days_in_month(target_year, target_month))
         st.info(f"ℹ️ Ce mois compte {selected_working_days} jours ouvrables")
         
@@ -582,9 +682,9 @@ def main():
                 st.success(f"✅ Objectif de {target_value:,} enregistré pour {config_zone}")
                 st.rerun()
         
-        # YTD Initial (Janvier)
         st.markdown("---")
         st.markdown("### 📅 Initialisation YTD (Janvier Manuel)")
+        st.caption("⚠️ Saisissez ici le volume de janvier UNIQUEMENT si vous n'avez pas saisi les ventes jour par jour en janvier")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -598,7 +698,6 @@ def main():
                 st.success(f"✅ Volume de janvier ({ytd_volume:,}) enregistré pour {ytd_zone}")
                 st.rerun()
         
-        # Vue d'ensemble des targets
         st.markdown("---")
         st.markdown("### 📊 Vue d'Ensemble des Targets")
         
@@ -655,7 +754,6 @@ def main():
             else:
                 st.error("Ce jour férié existe déjà")
         
-        # Liste des jours fériés personnalisés
         st.markdown("---")
         st.markdown("### 📋 Jours Fériés Personnalisés")
         
@@ -673,7 +771,6 @@ def main():
         else:
             st.info("Aucun jour férié personnalisé")
         
-        # Calendrier du mois
         st.markdown("---")
         st.markdown("### 📆 Calendrier du Mois en Cours")
         
@@ -686,13 +783,16 @@ def main():
             total_days = calendar.monthrange(current_year, current_month)[1]
             st.metric("Jours Non-Ouvrables", total_days - len(working_days_list))
         
-        # Afficher le calendrier
         first_day = datetime(current_year, current_month, 1)
         last_day = datetime(current_year, current_month, calendar.monthrange(current_year, current_month)[1])
         
         cal_data = []
         current = first_day
         while current <= last_day:
+            holidays = get_public_holidays(current_year)
+            custom_holidays = get_custom_holidays()
+            all_holidays = holidays.union(custom_holidays)
+            
             is_working = is_working_day(current, all_holidays)
             day_type = "✅ Ouvrable" if is_working else "❌ Non-ouvrable"
             cal_data.append({
