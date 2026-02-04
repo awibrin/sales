@@ -38,7 +38,7 @@ st.markdown("""
 # ==================== JOURS FÉRIÉS ====================
 
 def get_public_holidays(year):
-    """Retourne les jours fériés belges/français/espagnols pour l'année"""
+    """Retourne les jours fériés belges/français/espagnols pour une année"""
     # Jours fériés fixes communs
     holidays = [
         datetime(year, 1, 1),   # Nouvel An
@@ -101,7 +101,7 @@ def count_working_days(start_date, end_date, holidays=None):
     return count
 
 def get_working_days_in_month(year, month):
-    """Retourne la liste des jours ouvrables d'un mois"""
+    """Retourne la liste des jours ouvrables dans un mois"""
     holidays = get_public_holidays(year)
     first_day = datetime(year, month, 1)
     last_day_num = calendar.monthrange(year, month)[1]
@@ -263,7 +263,7 @@ def save_ytd_init(zone, year, january_volume):
         conn.close()
 
 def get_sales_data(zone, year, month):
-    """Récupère les ventes d'une zone pour un mois donné"""
+    """Récupère les ventes pour une zone et un mois donné"""
     conn = get_db_connection()
     query = '''
         SELECT date, volume 
@@ -467,8 +467,8 @@ def main():
             st.metric("📆 Jours Ouvrables Total", f"{working_days_passed}/{working_days_total}")
         
         # Alerte run-rate
-        if run_rate > 0:
-            avg_daily = monthly_realized / working_days_passed if working_days_passed > 0 else 0
+        if run_rate > 0 and working_days_passed > 0:
+            avg_daily = monthly_realized / working_days_passed
             if run_rate > avg_daily * 1.2:
                 st.error(f"🚨 ATTENTION : Le run-rate nécessaire ({run_rate:.1f}) est {((run_rate/avg_daily-1)*100):.0f}% supérieur à votre moyenne actuelle ({avg_daily:.1f})")
             elif run_rate > avg_daily:
@@ -707,44 +707,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-## 🆕 Nouveautés - Version Jours Ouvrables
-
-### ✅ Améliorations Majeures :
-
-1. **Calcul sur Jours Ouvrables Uniquement**
-   - Exclusion automatique des weekends (samedi/dimanche)
-   - Exclusion des jours fériés belges/français/espagnols
-   - Jours fériés mobiles (Pâques, Ascension, Pentecôte) calculés automatiquement
-
-2. **Run-Rate Précis**
-   - Le run-rate quotidien ne compte QUE les jours ouvrables restants
-   - Exemple : s'il reste 5 jours calendaires mais seulement 3 jours ouvrables, le calcul se fait sur 3
-
-3. **Objectifs Hebdomadaires Ajustés**
-   - Les targets hebdomadaires sont proportionnelles au nombre de jours ouvrables de chaque semaine
-   - Une semaine avec un jour férié aura un target plus bas
-
-4. **Onglet Jours Fériés**
-   - Liste des jours fériés standards
-   - Ajout de jours fériés personnalisés (fermeture annuelle, ponts, etc.)
-   - Calendrier mensuel montrant les jours ouvrables/non-ouvrables
-
-5. **Alertes Intelligentes**
-   - Avertissement si vous saisissez des ventes un weekend/jour férié
-   - Indicateur "Aujourd'hui est un jour ouvrable" dans le dashboard
-   - Alerte si le run-rate nécessaire dépasse votre moyenne actuelle
-
-### 📊 Exemple de Calcul :
-
-**Situation :** 
-- Target du mois : 220 ventes
-- Jours ouvrables totaux : 22 jours
-- Jour actuel : 10 février (12 jours ouvrables passés)
-- Réalisé : 100 ventes
-- Jours ouvrables restants : 10 jours
-
-**Run-Rate Intransigeant :**
-```
-(220 - 100) / 10 = 12 ventes/jour ouvrable
